@@ -1,0 +1,80 @@
+{
+ "description": "Ilmarinen file reference encoding vectors. 'name_hex' is the raw name bytes; 'ref' is file:<root>:<encoded>.",
+ "encode": [
+  {
+   "name": "plain-ascii",
+   "name_hex": "7265706f72742d323032362e747874",
+   "ref": "file:docs:report-2026.txt"
+  },
+  {
+   "name": "space",
+   "name_hex": "6d792066696c652e747874",
+   "ref": "file:docs:my%20file.txt"
+  },
+  {
+   "name": "colon",
+   "name_hex": "613a62",
+   "ref": "file:docs:a%3Ab"
+  },
+  {
+   "name": "percent",
+   "name_hex": "313030252e747874",
+   "ref": "file:docs:100%25.txt"
+  },
+  {
+   "name": "tilde-unreserved",
+   "name_hex": "7e6261636b7570",
+   "ref": "file:docs:~backup"
+  },
+  {
+   "name": "e-acute-nfc",
+   "name_hex": "636166c3a9",
+   "ref": "file:docs:caf%C3%A9"
+  },
+  {
+   "name": "e-acute-nfd-stays-distinct",
+   "name_hex": "63616665cc81",
+   "ref": "file:docs:cafe%CC%81"
+  },
+  {
+   "name": "control-character",
+   "name_hex": "610a62",
+   "ref": "file:docs:a%0Ab"
+  },
+  {
+   "name": "invalid-utf8-linux",
+   "name_hex": "626164ff2e62696e",
+   "ref": "file:docs:bad%FF.bin",
+   "linux_only": true
+  },
+  {
+   "name": "nested-path",
+   "path_hex": [
+    "73756220646972",
+    "782e747874"
+   ],
+   "ref": "file:docs:sub%20dir/x.txt"
+  }
+ ],
+ "windows_errors": [
+  {
+   "name": "unpaired-surrogate",
+   "name_codepoints": [
+    97,
+    55296,
+    98
+   ],
+   "error": "unrepresentable-name"
+  }
+ ],
+ "windows_keys": [
+  {
+   "name": "case-insensitive-key",
+   "names": [
+    "Report.TXT",
+    "report.txt"
+   ],
+   "same_key": true
+  }
+ ]
+}
