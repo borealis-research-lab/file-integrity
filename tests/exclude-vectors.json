@@ -1,0 +1,111 @@
+{
+ "description": "Ilmarinen exclusion vectors. 'path' uses / separators relative to the root; is_dir says whether the entry is a directory.",
+ "cases": [
+  {
+   "pattern": "*.tmp",
+   "path": "a.tmp",
+   "is_dir": false,
+   "excluded": true
+  },
+  {
+   "pattern": "*.tmp",
+   "path": "sub/a.tmp",
+   "is_dir": false,
+   "excluded": false
+  },
+  {
+   "pattern": "**/*.tmp",
+   "path": "sub/deep/a.tmp",
+   "is_dir": false,
+   "excluded": true
+  },
+  {
+   "pattern": "**/*.tmp",
+   "path": "a.tmp",
+   "is_dir": false,
+   "excluded": true
+  },
+  {
+   "pattern": "cache/",
+   "path": "cache",
+   "is_dir": true,
+   "excluded": true
+  },
+  {
+   "pattern": "cache/",
+   "path": "cache",
+   "is_dir": false,
+   "excluded": false
+  },
+  {
+   "pattern": "cache",
+   "path": "cache",
+   "is_dir": false,
+   "excluded": true
+  },
+  {
+   "pattern": "logs/**",
+   "path": "logs/2026/a.log",
+   "is_dir": false,
+   "excluded": true
+  },
+  {
+   "pattern": "logs/**",
+   "path": "other/a.log",
+   "is_dir": false,
+   "excluded": false
+  },
+  {
+   "pattern": "?.txt",
+   "path": "a.txt",
+   "is_dir": false,
+   "excluded": true
+  },
+  {
+   "pattern": "?.txt",
+   "path": "ab.txt",
+   "is_dir": false,
+   "excluded": false
+  },
+  {
+   "pattern": "*.TXT",
+   "path": "readme.txt",
+   "is_dir": false,
+   "excluded": true
+  },
+  {
+   "pattern": "CAF\u00c9.txt",
+   "path": "cafe\u0301.txt",
+   "is_dir": false,
+   "excluded": true
+  },
+  {
+   "pattern": "a*b",
+   "path": "a/b",
+   "is_dir": false,
+   "excluded": false
+  },
+  {
+   "pattern": "**",
+   "path": "anything/at/all",
+   "is_dir": false,
+   "excluded": true
+  }
+ ],
+ "invalid": [
+  "",
+  "/abs",
+  "[ab]",
+  "{a,b}",
+  "!neg",
+  "a//b",
+  "./a",
+  "a/../b",
+  "a**",
+  "**b/c",
+  "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "a\\b",
+  "tab\tname",
+  "new\nline"
+ ]
+}
