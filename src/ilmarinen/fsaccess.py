@@ -28,6 +28,8 @@ STABILITY_RETRIES = 2
 
 # Test hook: called with the entry name between listing and opening (used to simulate races).
 BEFORE_OPEN: Callable[[str], None] | None = None
+# Test hook: called with the entry name after enumeration returned it, before its metadata is read.
+AFTER_ENUMERATE: Callable[[str], None] | None = None
 
 
 class FsError(Exception):
@@ -44,7 +46,7 @@ class UnsafePlatform(Exception):
 @dataclass
 class Listed:
     name: str
-    kind: str  # file | dir | link | special
+    kind: str  # file | dir | link | special | vanished (enumerated, then gone before inspection)
     identity: tuple | None = None
     special_type: str = ""
 
@@ -121,10 +123,14 @@ class LinuxFs:
         try:
             with os.scandir(node.native) as it:
                 for entry in it:
+                    if AFTER_ENUMERATE:
+                        AFTER_ENUMERATE(entry.name)
                     try:
                         st = entry.stat(follow_symlinks=False)
                     except FileNotFoundError:
-                        continue  # vanished before it was listed: not part of this listing
+                        # Enumerated, then gone: report it, never skip it silently.
+                        out.append(Listed(entry.name, "vanished"))
+                        continue
                     kind, special = self._kind(st.st_mode)
                     out.append(Listed(entry.name, kind, (st.st_dev, st.st_ino), special))
         except OSError as exc:
@@ -322,9 +328,13 @@ class WindowsFs:
         try:
             with os.scandir(self._long(node.path)) as it:
                 for entry in it:
+                    if AFTER_ENUMERATE:
+                        AFTER_ENUMERATE(entry.name)
                     try:
                         st = entry.stat(follow_symlinks=False)
                     except FileNotFoundError:
+                        # Enumerated, then gone: report it, never skip it silently.
+                        out.append(Listed(entry.name, "vanished"))
                         continue
                     attrs = getattr(st, "st_file_attributes", 0)
                     if attrs & self.ATTR_REPARSE_POINT:

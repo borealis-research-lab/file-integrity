@@ -46,6 +46,7 @@ class BaselineError(Exception):
 class Baseline:
     data: dict
     digest: str
+    raw: bytes = b""  # the exact bytes that were validated (archived on replace)
 
     @property
     def entries(self) -> dict[str, dict]:
@@ -107,33 +108,56 @@ def _write_temp(target: Path, content: bytes) -> Path:
     return tmp
 
 
+def _publish_exclusive(tmp: Path, dest: Path) -> None:
+    """Atomically give a fully written temporary file its final name, never replacing an
+    existing file: os.rename refuses an existing target on Windows; os.link refuses on POSIX."""
+    try:
+        if os.name == "nt":
+            os.rename(tmp, dest)
+        else:
+            os.link(tmp, dest)
+            os.unlink(tmp)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
 def write_new(target: Path, data: dict) -> None:
     """Atomically create the baseline; refuses if one already exists."""
     tmp = _write_temp(target, serialise(data))
     try:
-        if os.name == "nt":
-            os.rename(tmp, target)  # fails if target exists
-        else:
-            os.link(tmp, target)  # fails if target exists
-            os.unlink(tmp)
+        _publish_exclusive(tmp, target)
     except FileExistsError:
         raise BaselineError("baseline-exists", "a baseline already exists; use 'baseline replace'") from None
-    finally:
-        if tmp.exists():
-            tmp.unlink()
 
 
-def write_replacement(target: Path, data: dict) -> Path:
-    """Write the new baseline, archive the old one, then move the new one into place."""
-    tmp = _write_temp(target, serialise(data))
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    archive = target.with_name(f"{target.stem}.{stamp}.replaced{target.suffix or '.json'}")
+def archive_name(target: Path) -> Path:
+    """Unique by construction: microsecond timestamp plus 64 random bits."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    return target.with_name(f"{target.stem}.{stamp}.{uuid.uuid4().hex[:16]}.replaced{target.suffix or '.json'}")
+
+
+def write_replacement(target: Path, data: dict, current: bytes) -> Path:
+    """Replace the baseline without ever losing the current one.
+
+    1. Write the new baseline to a temporary file (fsync).
+    2. Write a copy of the current baseline to a temporary file and publish it under a
+       unique archive name, never overwriting an existing file.
+    3. Only then atomically replace the current baseline with the new one.
+    If step 1 or 2 fails, the current baseline is untouched and the replacement is refused.
+    """
+    new_tmp = _write_temp(target, serialise(data))
     try:
-        os.rename(target, archive)
-        os.replace(tmp, target)
+        archive = archive_name(target)
+        try:
+            _publish_exclusive(_write_temp(target, current), archive)
+        except OSError as exc:
+            raise BaselineError("archive-failed", f"the current baseline could not be archived safely "
+                                                  f"({exc.strerror or exc}); nothing was changed") from None
+        os.replace(new_tmp, target)
     finally:
-        if tmp.exists():
-            tmp.unlink()
+        if new_tmp.exists():
+            new_tmp.unlink()
     return archive
 
 
@@ -150,7 +174,8 @@ def load(target: Path) -> Baseline:
                                 f"no baseline, but an archived one exists ({archives[-1]}); a replace may have been interrupted")
         raise BaselineError("baseline-missing", "no baseline found; run 'ilmarinen baseline create'")
     try:
-        data = cj.strict_loads(target.read_bytes())
+        raw = target.read_bytes()
+        data = cj.strict_loads(raw)
     except OSError:
         raise BaselineError("baseline-unreadable", "the baseline could not be read") from None
     except cj.StrictJsonError:
@@ -168,9 +193,108 @@ def load(target: Path) -> Baseline:
     if not isinstance(stored, str) or stored != computed:
         raise BaselineError("baseline-integrity-failure", "the baseline's digest does not match its content",
                             integrity=True)
-    if not isinstance(data["entries"], list) or not all(isinstance(e, dict) and "key" in e for e in data["entries"]):
-        raise BaselineError("baseline-integrity-failure", "the baseline entries are malformed", integrity=True)
-    return Baseline(data, computed)
+    problem = structure_problem(data)
+    if problem:
+        raise BaselineError("baseline-integrity-failure", f"the baseline is malformed: {problem}", integrity=True)
+    return Baseline(data, computed, raw)
+
+
+# --- full structural validation ---------------------------------------------------------------
+
+RE_ROOT_ID = re.compile(r"[a-z][a-z0-9-]{0,31}")
+RE_REF = re.compile(r"file:([a-z][a-z0-9-]{0,31}):(?:[A-Za-z0-9._~/-]|%[0-9A-F]{2})*")
+RE_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z")
+RE_DECIMAL = re.compile(r"[0-9]{1,20}")
+RE_HEX32 = re.compile(r"[0-9a-f]{32}")
+RE_PRINTABLE = re.compile(r"[ -~]{1,32}")
+
+
+def _is_str(value, regex) -> bool:
+    return isinstance(value, str) and regex.fullmatch(value) is not None
+
+
+def _valid_identity(value) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if set(value) == {"dev", "ino"}:
+        return _is_str(value["dev"], RE_DECIMAL) and _is_str(value["ino"], RE_DECIMAL)
+    if set(value) == {"volume_serial", "file_id"}:
+        return _is_str(value["volume_serial"], RE_DECIMAL) and _is_str(value["file_id"], RE_HEX32)
+    return False
+
+
+def structure_problem(data: dict) -> str | None:
+    """Return a description of the first structural problem, or None if the whole baseline is
+    well-formed. Never raises: malformed data must fail safely, not crash."""
+    from ilmarinen.patterns import PatternError, validate as validate_pattern
+
+    if not _is_str(data.get("created_at"), RE_TIMESTAMP):
+        return "created_at"
+    if not _is_str(data.get("agent_version"), RE_PRINTABLE):
+        return "agent_version"
+    if not _is_str(data.get("config_fingerprint"), RE_HEX64):
+        return "config_fingerprint"
+    if "replaced" in data:
+        rep = data["replaced"]
+        if not (isinstance(rep, dict) and set(rep) == {"at", "previous_digest"}
+                and _is_str(rep["at"], RE_TIMESTAMP) and _is_str(rep["previous_digest"], RE_HEX64)):
+            return "replaced"
+
+    roots = data.get("roots")
+    if not isinstance(roots, list) or not 1 <= len(roots) <= 50:
+        return "roots"
+    root_ids = set()
+    for root in roots:
+        if not isinstance(root, dict) or set(root) != {"id", "path_identity", "object_identity", "recursive", "exclude"}:
+            return "root record fields"
+        if not _is_str(root["id"], RE_ROOT_ID) or root["id"] in root_ids:
+            return "root id"
+        root_ids.add(root["id"])
+        if not _is_str(root["path_identity"], RE_HEX64):
+            return "root path_identity"
+        if not _valid_identity(root["object_identity"]):
+            return "root object_identity"
+        if not isinstance(root["recursive"], bool):
+            return "root recursive"
+        if not isinstance(root["exclude"], list) or len(root["exclude"]) > 100:
+            return "root exclude"
+        for pattern in root["exclude"]:
+            try:
+                validate_pattern(pattern)
+            except PatternError:
+                return "root exclude pattern"
+    if data["config_fingerprint"] != fingerprint(roots):
+        return "config_fingerprint does not match the roots"
+
+    entries = data.get("entries")
+    if not isinstance(entries, list):
+        return "entries"
+    keys = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return "entry record"
+        kind = entry.get("kind")
+        fields = {"file": {"key", "ref", "kind", "sha256", "size", "mtime"},
+                  "link": {"key", "ref", "kind", "link_target_sha256"}}.get(kind) if isinstance(kind, str) else None
+        if fields is None or set(entry) != fields:
+            return "entry fields or kind"
+        key, ref = entry["key"], entry["ref"]
+        if not _is_str(key, RE_REF) or not _is_str(ref, RE_REF):
+            return "entry key or ref"
+        if RE_REF.fullmatch(key).group(1) not in root_ids or RE_REF.fullmatch(ref).group(1) not in root_ids:
+            return "entry belongs to an unknown root"
+        if key in keys:
+            return "duplicate entry key"
+        keys.add(key)
+        if kind == "file":
+            if not _is_str(entry["sha256"], RE_HEX64) or not _is_str(entry["mtime"], RE_TIMESTAMP):
+                return "entry sha256 or mtime"
+            size = entry["size"]
+            if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+                return "entry size"
+        elif not _is_str(entry["link_target_sha256"], RE_HEX64):
+            return "entry link_target_sha256"
+    return None
 
 
 def verify_against(baseline: Baseline, config: Config, scan: ScanResult, expected_digest: str | None) -> None:

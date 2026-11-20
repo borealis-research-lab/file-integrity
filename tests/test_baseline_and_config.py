@@ -97,9 +97,10 @@ def test_replace_requires_current_digest_and_archives(capsys, setup):
     assert report["findings"] == [] and report["extensions"]["baseline_replaced_at"]
 
 
-def test_interrupted_replace_reports_baseline_missing(capsys, setup, monkeypatch):
+def test_failed_final_step_keeps_current_baseline(capsys, setup, monkeypatch):
     root, config, target = setup
     digest = create_baseline(capsys, config)
+    before = target.read_bytes()
 
     def fail(*args, **kwargs):
         raise OSError("simulated power loss")
@@ -108,10 +109,91 @@ def test_interrupted_replace_reports_baseline_missing(capsys, setup, monkeypatch
     code, _, _ = run(capsys, "baseline", "replace", "--config", config, "--confirm-replace", digest)
     assert code == 1
     monkeypatch.undo()
+    assert target.read_bytes() == before  # the current baseline was never removed
+    assert check_json(capsys, config)["status"] == "ok"
+
+
+def test_missing_baseline_names_the_archive(capsys, setup):
+    root, config, target = setup
+    digest = create_baseline(capsys, config)
+    run(capsys, "baseline", "replace", "--config", config, "--confirm-replace", digest)
+    target.unlink()  # e.g. deleted by mistake after a replacement
     report = check_json(capsys, config)
     assert report["status"] == "error" and error_codes(report) == {"baseline-missing": 1}
-    assert "replaced" in report["errors"][0]["message"]  # names the archive to restore
-    assert report["findings"] == []
+    assert ".replaced.json" in report["errors"][0]["message"]
+
+
+def test_repeated_replacements_never_overwrite_archives(capsys, setup):
+    root, config, target = setup
+    versions = [target.read_bytes() if target.exists() else None]
+    digest = create_baseline(capsys, config)
+    originals = [target.read_bytes()]
+    for i in range(3):  # several replacements within the same second
+        write(root / "a.txt", f"version {i}")
+        code, out, err = run(capsys, "baseline", "replace", "--config", config, "--confirm-replace", digest)
+        assert code == 0, err
+        digest = out.split("Baseline digest: ")[1].split()[0]
+        originals.append(target.read_bytes())
+    archives = sorted(target.parent.glob("baseline.*.replaced.json"))
+    assert len(archives) == 3
+    assert sorted(a.read_bytes() for a in archives) == sorted(originals[:3])  # each previous version kept
+
+
+def test_existing_archive_destination_refuses_replacement(capsys, setup, monkeypatch):
+    root, config, target = setup
+    digest = create_baseline(capsys, config)
+    before = target.read_bytes()
+    occupied = target.with_name("baseline.occupied.replaced.json")
+    occupied.write_text("an earlier archive")
+    monkeypatch.setattr(baseline_mod, "archive_name", lambda t: occupied)
+    code, _, err = run(capsys, "baseline", "replace", "--config", config, "--confirm-replace", digest)
+    assert code == 1 and "could not be archived safely" in err
+    assert occupied.read_text() == "an earlier archive"  # never overwritten
+    assert target.read_bytes() == before  # current baseline untouched
+    assert not list(target.parent.glob("*.tmp"))
+
+
+def test_entry_vanishing_after_enumeration_blocks_baseline(capsys, setup):
+    from ilmarinen import fsaccess
+
+    root, config, target = setup
+    fsaccess.AFTER_ENUMERATE = lambda name: (root / "a.txt").unlink() if name == "a.txt" else None
+    try:
+        code, _, err = run(capsys, "baseline", "create", "--config", config)
+    finally:
+        fsaccess.AFTER_ENUMERATE = None
+    assert code == 1 and not target.exists()
+    assert "vanished" in err and "file:docs:a.txt" in err
+
+
+def test_entry_vanishing_after_enumeration_is_reported_in_check(capsys, setup):
+    from ilmarinen import fsaccess
+
+    root, config, target = setup
+    create_baseline(capsys, config)
+    fsaccess.AFTER_ENUMERATE = lambda name: (root / "a.txt").unlink() if name == "a.txt" else None
+    try:
+        report = check_json(capsys, config)
+    finally:
+        fsaccess.AFTER_ENUMERATE = None
+    assert report["status"] == "partial" and error_codes(report) == {"vanished": 1}
+    assert report["errors"][0]["ref"] == "file:docs:a.txt"
+    assert report["findings"] == []  # not claimed as deleted: it was present when enumerated
+
+
+def test_vanished_entry_matching_an_exclusion_is_just_excluded(capsys, tmp_path):
+    from ilmarinen import fsaccess
+
+    root = tmp_path / "monitored"
+    write(root / "keep.txt", "k")
+    write(root / "scratch.tmp", "t")
+    config = make_config(tmp_path, [{"id": "docs", "path": root, "exclude": ["*.tmp"]}])
+    fsaccess.AFTER_ENUMERATE = lambda name: (root / "scratch.tmp").unlink() if name == "scratch.tmp" else None
+    try:
+        code, _, err = run(capsys, "baseline", "create", "--config", config)
+    finally:
+        fsaccess.AFTER_ENUMERATE = None
+    assert code == 0, err
 
 
 # --- validation before every check -----------------------------------------------------
@@ -193,6 +275,57 @@ def test_changed_exclusions_are_config_changed(capsys, setup, tmp_path):
     make_config(tmp_path, [{"id": "docs", "path": root, "exclude": ["*.log"]}])
     report = check_json(capsys, config)
     assert error_codes(report) == {"config-changed-since-baseline": 1}
+
+
+# --- malformed baselines with a correctly recomputed embedded digest ------------------------
+
+
+def _redigest(target, mutate):
+    from ilmarinen import cj
+
+    data = json.loads(target.read_text())
+    mutate(data)
+    data.pop("digest", None)
+    data["digest"] = cj.digest(data)
+    target.write_bytes(cj.canonical(data) + bytes([10]))
+
+
+MALFORMED = {
+    "unhashable-entry-key": lambda d: d["entries"][0].update(key=["file:docs:a.txt"]),
+    "integer-entry-key": lambda d: d["entries"][0].update(key=7),
+    "duplicate-entry-key": lambda d: d["entries"].append(dict(d["entries"][0])),
+    "bad-ref-format": lambda d: d["entries"][0].update(ref="C:/absolute/path.txt"),
+    "unknown-root-in-key": lambda d: d["entries"][0].update(key="file:other:a.txt"),
+    "bad-sha256": lambda d: d["entries"][0].update(sha256="xyz"),
+    "negative-size": lambda d: d["entries"][0].update(size=-1),
+    "bool-size": lambda d: d["entries"][0].update(size=True),
+    "bad-mtime": lambda d: d["entries"][0].update(mtime="yesterday"),
+    "unknown-kind": lambda d: d["entries"][0].update(kind="device"),
+    "extra-entry-field": lambda d: d["entries"][0].update(note="x"),
+    "entries-not-list": lambda d: d.update(entries={"a": 1}),
+    "entry-not-object": lambda d: d["entries"].append("file:docs:x"),
+    "root-identity-wrong-shape": lambda d: d["roots"][0].update(object_identity={"inode": "1"}),
+    "root-path-identity-not-hex": lambda d: d["roots"][0].update(path_identity="not-a-hash"),
+    "root-recursive-not-bool": lambda d: d["roots"][0].update(recursive="yes"),
+    "root-bad-exclude-pattern": lambda d: d["roots"][0].update(exclude=["/abs"]),
+    "roots-empty": lambda d: d.update(roots=[]),
+    "fingerprint-inconsistent": lambda d: d.update(config_fingerprint="0" * 64),
+    "bad-created-at": lambda d: d.update(created_at=12345),
+    "bad-replaced-record": lambda d: d.update(replaced={"at": "now"}),
+}
+
+
+@pytest.mark.parametrize("case", sorted(MALFORMED))
+def test_malformed_baselines_fail_safely(capsys, setup, case):
+    root, config, target = setup
+    create_baseline(capsys, config)
+    _redigest(target, MALFORMED[case])
+    report = check_json(capsys, config)  # must not crash; must validate against the standard
+    assert report["status"] == "error"
+    assert error_codes(report) == {"baseline-integrity-failure": 1}
+    assert report["findings"][0]["rule_id"] == "baseline-integrity-failure"
+    code, _, err = run(capsys, "baseline", "replace", "--config", config, "--confirm-replace", "0" * 64)
+    assert code == 1 and "Traceback" not in err
 
 
 # --- configuration refusals --------------------------------------------------------------

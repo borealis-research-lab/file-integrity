@@ -102,7 +102,7 @@ class Scanner:
             return
         try:
             listed = next((e for e in self.fs.list_dir(parent) if e.name == name), None)
-            if listed is None:
+            if listed is None or listed.kind == "vanished":
                 self._error("vanished", root_ref, "configured file is missing")
                 return
             if listed.kind == "dir":
@@ -150,6 +150,15 @@ class Scanner:
             listed = group[0]
             seg = encoded[listed.name]
             disp = display + [refs.display_segment(seg)]
+            if listed.kind == "vanished":
+                # Its type is unknown, so it counts as excluded only if a pattern would exclude it
+                # either as a file or as a directory; otherwise the scan is incomplete.
+                if excluded(root.patterns, disp, False) or excluded(root.patterns, disp, True):
+                    self.result.excluded[root.id] += 1
+                else:
+                    self._error("vanished", refs.make_ref(root.id, segments + [seg]),
+                                "entry disappeared after it was enumerated", key)
+                continue
             if excluded(root.patterns, disp, listed.kind == "dir"):
                 self.result.excluded[root.id] += 1
                 continue

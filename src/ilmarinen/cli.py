@@ -117,7 +117,9 @@ def cmd_replace(args) -> int:
         return 1
     data = baseline.build(cfg, scan, replaced={"at": baseline.now(), "previous_digest": current.digest})
     try:
-        archive = baseline.write_replacement(target, data)
+        archive = baseline.write_replacement(target, data, current.raw)
+    except baseline.BaselineError as exc:
+        return _err(exc.message, 1)
     except OSError as exc:
         return _err(f"cannot replace the baseline: {exc.strerror or exc}", 1)
     print(f"Baseline replaced ({len(data['entries'])} entries). Previous baseline archived as {archive.name}.")
