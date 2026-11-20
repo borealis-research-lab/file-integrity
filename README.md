@@ -18,6 +18,8 @@ ilmarinen check --config ilmarinen.json --expected-digest <digest>
 
 The baseline also contains its own digest, but that **only detects accidental corruption**. An attacker who can change both your files and the baseline can recompute the embedded digest and hide their changes. **Only the independently stored digest catches that.** Each report states whether it was used (`extensions.digest_verified_independently`).
 
+Keeping the digest only in Borealis Node's `node.json` on the same computer **doesn't** protect against an attacker with administrator rights, who could change both. See **[docs/expected-digest.md](docs/expected-digest.md)** for where to keep the digest, how to configure it, a periodic verification procedure, and a worked example.
+
 ## What it checks, and what it doesn't
 
 - **Checked:** the content (SHA-256) of regular files; whether entries are added or deleted; whether a file became a link or a special file; where links point. Links are fingerprinted, never followed.
